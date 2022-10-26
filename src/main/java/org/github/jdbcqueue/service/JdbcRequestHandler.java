@@ -6,6 +6,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import javax.sql.DataSource;
 
@@ -13,8 +14,8 @@ import org.github.jdbcqueue.model.HandleRequestException;
 import org.github.jdbcqueue.model.Request;
 import org.github.jdbcqueue.model.RequestException;
 import org.github.jdbcqueue.model.Response;
-import org.github.jdbcqueue.model.SaveRequestException;
 import org.github.jdbcqueue.model.ResponseException;
+import org.github.jdbcqueue.model.SaveRequestException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,22 +61,34 @@ public abstract class JdbcRequestHandler {
 	private final DatabaseType databaseType;
 
 	public enum DatabaseType {
-		POSTGRESQL(" SKIP LOCKED"),
-		ORACLE(" SKIP LOCKED"),
-		MY_SQL(" SKIP LOCKED"),
-		MS_SQL(" READPAST"),
-		DB2(" SKIP LOCKED DATA");
+		POSTGRESQL(" FOR UPDATE SKIP LOCKED", "ON CONFLICT DO NOTHING", ""),
+		ORACLE(" ", "", " FOR UPDATE SKIP LOCKED"),
+		MY_SQL(" FOR UPDATE SKIP LOCKED", "", ""),
+		MS_SQL(" FOR UPDATE READPAST", "", ""),
+		DB2(" FOR UPDATE SKIP LOCKED DATA", "", "");
 
-		private final String skipLockSql;
+		private final String forUpdateSkipLocked;
+		private String onConflict;
+		private String forUpdateSkipLockedForId;
 
-		private DatabaseType(String skipLockSql) {
-			this.skipLockSql = skipLockSql;
+		private DatabaseType(String skipLockSql, String onConflict, String skipLockedForId) {
+			this.forUpdateSkipLocked = skipLockSql;
+			this.onConflict = onConflict;
+			this.forUpdateSkipLockedForId = skipLockedForId;
+
 		}
 
-		public String getSkipLockSql() {
-			return skipLockSql;
+		public String getSkipLock() {
+			return forUpdateSkipLocked;
 		}
 
+		public String getOnConflict() {
+			return onConflict;
+		}
+
+		public String getForUpdateSkipLockedForId() {
+			return forUpdateSkipLockedForId;
+		}
 	}
 
 	protected JdbcRequestHandler(
@@ -102,7 +115,8 @@ public abstract class JdbcRequestHandler {
 			int fetchTasksForHandlingLimit,
 			int fetchTasksForNotificationLimit,
 			DatabaseType databaseType) {
-		this(table, dataSource, deleteAfterResponseSent, fetchTasksForHandlingLimit, fetchTasksForNotificationLimit, databaseType, LoggerFactory.getLogger(JdbcRequestHandler.class));
+		this(table, dataSource, deleteAfterResponseSent, fetchTasksForHandlingLimit, fetchTasksForNotificationLimit,
+				databaseType, LoggerFactory.getLogger(JdbcRequestHandler.class));
 	}
 
 	/**
@@ -122,8 +136,12 @@ public abstract class JdbcRequestHandler {
 				try (ResultSet resultSet = statement.executeQuery()) {
 					while (resultSet.next()) {
 						Request request = new Request(resultSet.getLong(1), resultSet.getBytes(2));
-						Response response = handle(request, connection);
-						save(request.getId(), response, connection);
+						Optional<Long> optionalRequest = lockRequest(request.getId(), connection,
+								getSelecteForUpdatedNotHandledIndividualRequest());
+						if (optionalRequest.isPresent()) {
+							Response response = handle(request, connection);
+							save(request.getId(), response, connection);
+						}
 					}
 				}
 			}
@@ -132,6 +150,24 @@ public abstract class JdbcRequestHandler {
 		} catch (SQLException e) {
 			logger.error("Handling of new tasks failed because of " + e.getMessage(), e);
 			throw new SaveRequestException(e.getMessage(), e);
+		}
+	}
+
+	protected Optional<Long> lockRequest(long requestId, Connection connection, String sql) throws SQLException {
+		if (databaseType == DatabaseType.ORACLE) {
+			// in case of Oracle we have to do individual locking.
+			try (PreparedStatement statement = connection.prepareStatement(sql)) {
+				statement.setLong(1, requestId);
+				try (ResultSet restResultSet = statement.executeQuery()) {
+					if (restResultSet.next()) {
+						return Optional.of(requestId);
+					} else {
+						return Optional.empty();
+					}
+				}
+			}
+		} else {
+			return Optional.of(requestId);
 		}
 	}
 
@@ -151,12 +187,20 @@ public abstract class JdbcRequestHandler {
 				try (ResultSet resultSet = statement.executeQuery()) {
 					while (resultSet.next()) {
 						long requestId = resultSet.getLong(1);
-						respond(requestId, new Response(resultSet.getInt(2), resultSet.getBytes(3)));
-						if (deleteAfterResponseSent) {
-							delete(requestId, connection);
-						} else {
-							saveResponseSentTimestamp(requestId, connection);
+						Optional<Long> optionalRequest = lockRequest(
+								requestId, 
+								connection,
+								getSelecteForUpdatedNotNotifiedIndividualRequest()
+								);
+						if (optionalRequest.isPresent()) {
+							respond(requestId, new Response(resultSet.getInt(2), resultSet.getBytes(3)));
+							if (deleteAfterResponseSent) {
+								delete(requestId, connection);
+							} else {
+								saveResponseSentTimestamp(requestId, connection);
+							}
 						}
+
 					}
 				}
 			}
@@ -220,15 +264,18 @@ public abstract class JdbcRequestHandler {
 	}
 
 	public List<Long> getNotHandledRequestIds() {
-		return new SelectListQueryExecutor<Long>().extract(getSelectNotHandleRequestIdSql(), new RequestIdResultSetExtractor());
+		return new SelectListQueryExecutor<Long>().extract(getSelectNotHandleRequestIdSql(),
+				new RequestIdResultSetExtractor());
 	}
 
 	public List<Long> getNotNotifiedRequestIds() {
-		return new SelectListQueryExecutor<Long>().extract(getSelectNotNotifiedRequestIdSql(), new RequestIdResultSetExtractor());
+		return new SelectListQueryExecutor<Long>().extract(getSelectNotNotifiedRequestIdSql(),
+				new RequestIdResultSetExtractor());
 	}
 
 	public List<Long> getNotifiedRequestIds() {
-		return new SelectListQueryExecutor<Long>().extract(getSelectNotifiedRequestIdSql(), new RequestIdResultSetExtractor());
+		return new SelectListQueryExecutor<Long>().extract(getSelectNotifiedRequestIdSql(),
+				new RequestIdResultSetExtractor());
 	}
 
 	protected void save(long requestId, Response response, Connection connection) throws SaveRequestException {
@@ -311,28 +358,44 @@ public abstract class JdbcRequestHandler {
 		return "SELECT request_id FROM " + table + " WHERE response_code IS NULL";
 	}
 
+	protected String getSelecteForUpdatedNotHandledIndividualRequest() {
+		return "SELECT request_id FROM " + table + " WHERE response_code IS NULL and request_id=? "
+				+ databaseType.forUpdateSkipLockedForId;
+	}
+
+	protected String getSelecteForUpdatedNotNotifiedIndividualRequest() {
+		return "SELECT request_id FROM " + table
+				+ " WHERE response_code IS NOT NULL and response_code IS NOT NULL and response_notification_timestamp IS NULL and request_id=? "
+				+ databaseType.forUpdateSkipLockedForId;
+	}
+
+	protected String getSelectNotNotifiedRequestIdSql() {
+		return "SELECT request_id FROM " + table
+				+ " WHERE response_code IS NOT NULL and response_notification_timestamp IS NULL";
+	}
+
 	protected String getSelectNotifiedRequestIdSql() {
 		return "SELECT request_id FROM " + table + " WHERE response_notification_timestamp IS NOT NULL";
 	}
 
-	protected String getSelectNotNotifiedRequestIdSql() {
-		return "SELECT request_id FROM " + table + " WHERE response_code IS NOT NULL and response_notification_timestamp IS NULL";
-	}
-
 	protected String getSelectForUpdateNewRequests() {
-		return "SELECT request_id, request FROM " + table + " WHERE response_code IS NULL LIMIT " + fetchRequestForHandlingLimit + " FOR UPDATE " + databaseType.skipLockSql;
+		return "SELECT request_id, request FROM " + table + " WHERE response_code IS NULL FETCH FIRST  "
+				+ fetchRequestForHandlingLimit + " ROW ONLY " + databaseType.forUpdateSkipLocked;
 	}
 
 	protected String getSelecteForUpdatedHandledRequests() {
-		return "SELECT request_id, response_code, response FROM " + table + " WHERE response_code IS NOT NULL LIMIT " + fetchResposeLimit + " FOR UPDATE " + databaseType.skipLockSql;
+		return "SELECT request_id, response_code, response FROM " + table
+				+ " WHERE response_code IS NOT NULL and response_notification_timestamp IS NULL FETCH FIRST " + fetchResposeLimit + " ROW ONLY "
+				+ databaseType.forUpdateSkipLocked;
 	}
 
 	protected String getSaveResponseSql() {
-		return "UPDATE " + table + " SET response_code = ?, response = ? WHERE request_id = ? AND response_code IS NULL";
+		return "UPDATE " + table
+				+ " SET response_code = ?, response = ? WHERE request_id = ? AND response_code IS NULL";
 	}
 
 	protected String getSaveNewRequestSql() {
-		return "INSERT INTO " + table + " (request_id, request) VALUES (?,?) ON CONFLICT DO NOTHING";
+		return "INSERT INTO " + table + " (request_id, request) VALUES (?,?) " + databaseType.getOnConflict();
 	}
 
 	protected String getDeleteRequestSql() {

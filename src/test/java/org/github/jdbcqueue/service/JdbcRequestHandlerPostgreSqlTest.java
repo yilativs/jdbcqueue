@@ -23,7 +23,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 @Testcontainers
-public class JdbcRequestHandlerTest {
+public class JdbcRequestHandlerPostgreSqlTest {
 
 	private static final String POSTGRESQL_IMAGE_VERSION = "14";
 	private static final String TEST_PASSWORD = "testPassword";
@@ -50,7 +50,7 @@ public class JdbcRequestHandlerTest {
 
 	@Test
 	void addsNewRequests() throws RequestException {
-		JdbcRequestHandler service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
+		var service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
 		service.deleteAll();
 		boolean failIfTaskAlreadyExist = true;
 		service.add(requests, failIfTaskAlreadyExist);
@@ -59,7 +59,7 @@ public class JdbcRequestHandlerTest {
 
 	@Test()
 	void failsToAddsDuplicatedRequests() throws RequestException {
-		JdbcRequestHandler service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
+		var service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
 		service.deleteAll();
 		boolean failIfTaskAlreadyExist = true;
 		service.add(requests, failIfTaskAlreadyExist);
@@ -73,7 +73,7 @@ public class JdbcRequestHandlerTest {
 
 	@Test
 	void handlesAndNotifiesOneByOne() throws RequestException {
-		JdbcRequestHandler service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
+		var service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 1, 1);
 		service.deleteAll();
 		boolean failIfTaskAlreadyExist = true;
 		service.add(requests, failIfTaskAlreadyExist);
@@ -95,7 +95,7 @@ public class JdbcRequestHandlerTest {
 
 	@Test
 	void handlesAndNotifiesWithBatches() throws RequestException {
-		JdbcRequestHandler service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 2, 2);
+		var service = createHandler(dataSource, "test.test_task", requestIdToResponse, false, 2, 2);
 		service.deleteAll();
 		boolean failIfTaskAlreadyExist = true;
 		service.add(requests, failIfTaskAlreadyExist);
@@ -115,7 +115,7 @@ public class JdbcRequestHandlerTest {
 	@Test
 	void deletesNotifiedTasksOnDemand() throws RequestException {
 		boolean deleteAfterCompletionNotification = true;
-		JdbcRequestHandler service = createHandler(dataSource, "test.test_task", requestIdToResponse, deleteAfterCompletionNotification, 2, 2);
+		var service = createHandler(dataSource, "test.test_task", requestIdToResponse, deleteAfterCompletionNotification, 2, 2);
 		service.deleteAll();
 		boolean failIfTaskAlreadyExist = true;
 		service.add(requests, failIfTaskAlreadyExist);
@@ -159,7 +159,7 @@ public class JdbcRequestHandlerTest {
 		config.setUsername(TEST_USER);
 		config.setPassword(TEST_PASSWORD);
 		DataSource dataSource = new HikariDataSource(config);
-		Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").baselineOnMigrate(true).load().migrate();
+		Flyway.configure().dataSource(dataSource).locations("classpath:db/migration/postgres").baselineOnMigrate(true).load().migrate();
 		return dataSource;
 	}
 
